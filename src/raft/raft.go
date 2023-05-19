@@ -19,13 +19,18 @@ package raft
 
 import (
 	//	"bytes"
+
+	"fmt"
+	"log"
+	"math/rand"
+	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	//	"6.824/labgob"
 	"6.824/labrpc"
 )
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -63,7 +68,25 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	// TODO: ADD state,term
+	state int // 0 follower, 1 leader, 2 candidate
+	term  int
+	lastHeartbeat time.Time
+	requireHeartbeat bool
+}
 
+type AppendEntriesArgs struct {
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []interface{}
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
 }
 
 // return currentTerm and whether this server
@@ -73,6 +96,8 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	term = rf.term
+	isleader = rf.state == 1
 	return term, isleader
 }
 
@@ -143,6 +168,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -151,6 +180,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int
+	VoteGranted bool
 }
 
 //
@@ -158,6 +189,17 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	if rf.term > args.Term {
+		reply.VoteGranted = false
+		reply.Term = rf.term
+		return
+	}
+	if rf.term < args.Term {
+		rf.term = args.Term
+		rf.state = 0
+		reply.VoteGranted = true
+	}
+
 }
 
 //
@@ -245,6 +287,17 @@ func (rf *Raft) killed() bool {
 // heartsbeats recently.
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
+		// TODO: Set lastHeartbeat if needed.
+
+		randTime:=time.Duration(rand.Intn(300)+200)
+		time.Sleep(randTime*time.Millisecond)
+		if rf.checkHeartbeat(randTime){
+			rf.mu.Lock()
+			rf.requireHeartbeat = false
+			rf.state =2 
+			rf.mu.Unlock()
+			// TODO: Start election .
+		}
 
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
@@ -253,6 +306,14 @@ func (rf *Raft) ticker() {
 	}
 }
 
+func (rf *Raft) checkHeartbeat(delay time.Duration) bool{
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if time.Now().Sub(rf.lastHeartbeat) > delay {
+		return true
+	}
+	return false
+}
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -264,12 +325,21 @@ func (rf *Raft) ticker() {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 //
+func loggerMaker(id int) *log.Logger {
+    return log.New(os.Stdout, fmt.Sprintf("INFO (worker %d): ", id), log.Ldate|log.Ltime|log.Lshortfile)
+}
+func (rf *Raft) Core(){
+	// TODO: check state and act accordingly.
+
+}
+
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	go rf.Core()
 
 	// Your initialization code here (2A, 2B, 2C).
 
