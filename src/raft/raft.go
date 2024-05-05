@@ -70,6 +70,7 @@ type Raft struct {
 	lastHeartbeat time.Time
 	voteCount     int
 	leader        int
+	logger        *log.Logger
 }
 
 type AppendEntriesArgs struct {
@@ -93,8 +94,10 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
 	term = rf.term
 	isleader = rf.state == 1
+	rf.mu.Unlock()
 	return term, isleader
 }
 
@@ -171,45 +174,42 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	fmt.Printf("[RequestVote] node %d term %d receive vote from : %d term: %d\n", rf.me, rf.term, args.CandidateId, args.Term)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.logger.Printf("(%d){%d}[RequestVote] node %d term %d receive vote from : %d term: %d\n", rf.me, rf.term, rf.me, rf.term, args.CandidateId, args.Term)
 	if rf.term >= args.Term {
 		reply.VoteGranted = false
 		reply.Term = rf.term
 		return
 	}
 	if rf.term < args.Term {
-		rf.mu.Lock()
 		rf.term = args.Term
 		rf.state = 0
 		rf.lastHeartbeat = time.Now()
-		rf.mu.Unlock()
 		reply.VoteGranted = true
 	}
-	fmt.Printf("[RequestVote] node %d response done, current term: %d\n", rf.me, rf.term)
+	rf.logger.Printf("(%d){%d}[RequestVote] response done, current term: %d\n", rf.me, rf.term, rf.term)
 
 }
 func (rf *Raft) RequestHeartbeat(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// TODO:
-	if rf.isLeader() {
-		if args.Term > rf.term {
-			rf.mu.Lock()
-			rf.state = 0
-			rf.lastHeartbeat = time.Now()
-			rf.term = args.Term
-			// TODO: rf.leader = args.LeaderId
-			rf.mu.Unlock()
-		}
-		return
-	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()  // 使用 defer 确保锁一定会被解锁
+
+	// 更新最后一次心跳时间
+	rf.lastHeartbeat = time.Now()
+
+	// 如果接收到的任期大于当前任期，则更新状态
 	if args.Term > rf.term {
-		rf.mu.Lock()
-		rf.state = 0
-		rf.lastHeartbeat = time.Now()
+		rf.state = 0  // 假设 state = 0 表示跟随者
 		rf.term = args.Term
 		rf.leader = args.LeaderId
-		rf.mu.Unlock()
 	}
 
+	// 记录日志
+	rf.logger.Printf("(%d){%d}[RequestHeartbeat]term: %d, leader: %d,current leader %d\n",
+		rf.me, rf.term, rf.term, args.LeaderId, rf.leader)
+
+	// 可以在这里更新 reply 结构体，根据具体协议需求添加必要的信息
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -240,7 +240,7 @@ func (rf *Raft) RequestHeartbeat(args *AppendEntriesArgs, reply *AppendEntriesRe
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	fmt.Printf("node send vote: %d -----> %d\n", rf.me, server)
+	rf.logger.Printf("(%d){%d}[sendRequestVote]node send vote: %d -----> %d\n", rf.me, rf.term, rf.me, server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -282,6 +282,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
+	rf.logger.Printf("(%d){%d}[Kill]", rf.me, rf.term)
 	// Your code here, if desired.
 }
 
@@ -293,68 +294,80 @@ func (rf *Raft) killed() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
-		// TODO: Set lastHeartbeat if needed.
+	heartbeatTimeout := 1 * time.Second
 
-		randTime := time.Duration(rand.Intn(200)+400) * time.Millisecond
-		time.Sleep(randTime)
-		fmt.Printf("[ticker] node %d current state: %d\n", rf.me, rf.state)
-		if rf.heartbeatExpire(1*time.Second) && rf.requireHeartbeat() {
-			rf.mu.Lock()
-			rf.state = 2
-			rf.mu.Unlock()
-			// TODO: Start election .
+	for !rf.killed() {
+		time.Sleep(time.Duration(400+rand.Intn(150)) * time.Millisecond)
+
+		rf.mu.Lock()
+		elapsed := time.Since(rf.lastHeartbeat)
+		isTimeout := elapsed >= heartbeatTimeout
+		rf.logger.Printf("(%d){%d}[ticker] current state: %d, leader %d, term %d, elapsed since last heartbeat: %v\n",
+			rf.me, rf.term, rf.state, rf.leader, rf.term, elapsed)
+		rf.mu.Unlock()
+
+		if rf.state != 1 && isTimeout {
+			rf.logger.Printf("(%d){%d}[ticker] Heartbeat timeout for node %d. Starting election.\n", rf.me, rf.term, rf.me)
 			rf.startVote()
-
 		}
+
 		if rf.isLeader() {
 			rf.heartbeatAll()
-
 		}
-
-		// Your code here to check if a leader election should
-		// be started and to randomize sleeping time using
-		// time.Sleep().
 
 	}
 }
+
 func (rf *Raft) startVote() {
+	var wg sync.WaitGroup
+
 	rf.mu.Lock()
 	rf.term++
 	rf.voteCount = 1
+	// rf.leader = rf.me
 	rf.mu.Unlock()
-	fmt.Printf("node %d start vote\nlastHeartbeat:  %v\nterm:%d\n", rf.me, rf.lastHeartbeat, rf.term)
 
-	for i := 0; i < len(rf.peers); i++ {
+	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
+
+		wg.Add(1)
 		go func(i int) {
-			args := &RequestVoteArgs{}
+			defer wg.Done() // Ensure the WaitGroup counter decrements on goroutine completion.
+
+			args := &RequestVoteArgs{
+				Term:         rf.term,
+				CandidateId:  rf.me,
+				LastLogIndex: 0,
+				LastLogTerm:  0,
+			}
 			reply := &RequestVoteReply{}
-			args.Term = rf.term
-			args.CandidateId = rf.me
-			args.LastLogIndex = 0
-			args.LastLogTerm = 0
+
 			rf.sendRequestVote(i, args, reply)
+
+			rf.mu.Lock()
 			if reply.Term > rf.term {
-				rf.mu.Lock()
-				rf.term = reply.Term // WARNING: term is not atomic use another variable and max to decide
-				rf.state = 0
-				rf.mu.Unlock()
+				rf.term = reply.Term
+				rf.state = 0 // Assume state 0 is follower.
 			}
 			if reply.VoteGranted {
-				rf.mu.Lock()
 				rf.voteCount++
-				rf.mu.Unlock()
-				if rf.voteCount > len(rf.peers)/2 {
-					rf.convertToLeader()
-				}
 			}
-			fmt.Printf("[startVote] node %d voteCount: %d current term: %d\n", rf.me, rf.voteCount, rf.term)
+			rf.mu.Unlock()
 		}(i)
 	}
+
+	wg.Wait() // Wait for all voting goroutines to finish.
+
+	rf.logger.Printf("(%d){%d}[startVote]Vote end, term %d got %d\n", rf.me, rf.term, rf.term, rf.voteCount)
+	if rf.voteCount > len(rf.peers)/2 {
+		rf.convertToLeader()
+	}
+	rf.logger.Printf("(%d)[startVote]checked:%v\n", rf.me, rf.isLeader())
+
 }
+
 func (rf *Raft) heartbeatAll() {
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
@@ -363,27 +376,33 @@ func (rf *Raft) heartbeatAll() {
 		go func(i int) {
 			args := &AppendEntriesArgs{}
 			reply := &AppendEntriesReply{}
+			rf.mu.Lock()
 			args.Term = rf.term
 			args.LeaderId = rf.me
 			args.PrevLogIndex = 0 // TODO: log later
 			args.PrevLogTerm = 0
+			rf.logger.Printf("(%d){%d}[heartbeat] node heartbeat %d %d ---> %d\n",
+				rf.me, rf.term, args.LeaderId, rf.me, i)
+			rf.mu.Unlock()
 			rf.sendHeartbeat(i, args, reply)
+			rf.mu.Lock()
 			if reply.Term > rf.term {
-				rf.mu.Lock()
 				rf.term = reply.Term
 				rf.state = 0
-				rf.mu.Unlock()
 			}
-			fmt.Printf("[heartbeat] node heartbeat %d ---> %d\n", rf.me, i)
+			rf.mu.Unlock()
 		}(i)
 	}
+	rf.mu.Lock()
+	rf.lastHeartbeat = time.Now()
+	rf.mu.Unlock()
 }
 func (rf *Raft) convertToLeader() {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.logger.Printf("(%d)[convertToLeader] LEADER \n", rf.me)
 	rf.state = 1
-	rf.voteCount = 1
-	rf.term++
+	rf.leader = rf.me
+	rf.mu.Unlock()
 	// rf.lastHeartbeat = time.Now()
 }
 func (rf *Raft) convertToFollower(term int) {
@@ -396,10 +415,15 @@ func (rf *Raft) convertToFollower(term int) {
 }
 
 func (rf *Raft) requireHeartbeat() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	return rf.state == 0
 
 }
 func (rf *Raft) isLeader() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	return rf.state == 1
 
 }
@@ -407,7 +431,7 @@ func (rf *Raft) heartbeatExpire(delay time.Duration) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if time.Now().Sub(rf.lastHeartbeat) > delay {
-		fmt.Printf("node %d heartbeat expire\nactual delay: %v\nexpect delay: %v\n", rf.me, time.Now().Sub(rf.lastHeartbeat), delay)
+		rf.logger.Printf("(%d)[heartbeatExpire]actual delay: %.3f, expect delay: %.3f\n", rf.me, float32(time.Now().Sub(rf.lastHeartbeat))/1e9, float32(delay)/1e9)
 		return true
 	}
 	return false
@@ -423,7 +447,7 @@ func (rf *Raft) heartbeatExpire(delay time.Duration) bool {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 func loggerMaker(id int) *log.Logger {
-	return log.New(os.Stdout, fmt.Sprintf("INFO (worker %d): ", id), log.Ldate|log.Ltime|log.Lshortfile)
+	return log.New(os.Stdout, fmt.Sprintf("INFO (worker %d): ", id), log.Ldate|log.Lmicroseconds|log.Lshortfile)
 }
 func (rf *Raft) Core() {
 	// TODO: check state and act accordingly.
@@ -436,6 +460,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.logger = loggerMaker(me)
 	go rf.Core()
 
 	// Your initialization code here (2A, 2B, 2C).
