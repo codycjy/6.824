@@ -41,6 +41,11 @@ import (
 // in part 2D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
+var follower = 0
+var leader = 1
+var candidate = 2
+var baseDelay = 300
+
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
@@ -69,7 +74,8 @@ type Raft struct {
 	term          int
 	lastHeartbeat time.Time
 	voteCount     int
-	leader        int
+	LeaderId      int
+	votedFor      map[int]int
 	logger        *log.Logger
 }
 
@@ -176,39 +182,57 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.logger.Printf("(%d){%d}[RequestVote] node %d term %d receive vote from : %d term: %d\n", rf.me, rf.term, rf.me, rf.term, args.CandidateId, args.Term)
+
+	rf.lastHeartbeat = time.Now()
+	rf.logger.Printf("(%d){%d}[RequestVote] node %d  receive request-vote %d ----> %d term: %d\n", rf.me, rf.term, rf.me, args.CandidateId, rf.me, args.Term)
+
+	// 拒绝投票的情况
 	if rf.term >= args.Term {
 		reply.VoteGranted = false
 		reply.Term = rf.term
 		return
 	}
-	if rf.term < args.Term {
-		rf.term = args.Term
-		rf.state = 0
-		rf.lastHeartbeat = time.Now()
-		reply.VoteGranted = true
-	}
-	rf.logger.Printf("(%d){%d}[RequestVote] response done, current term: %d\n", rf.me, rf.term, rf.term)
 
+	// 考虑投票的情况
+	currentVote, votedThisTerm := rf.votedFor[args.Term]
+	if args.Term > rf.term || !votedThisTerm || currentVote == args.CandidateId {
+		rf.term = args.Term
+		rf.votedFor[args.Term] = args.CandidateId  // 更新当前任期的投票记录
+		rf.state = follower                        // 切换状态为follower
+		reply.VoteGranted = true
+		reply.Term = rf.term
+	} else {
+		// 如果在当前任期已经投票给其他候选人，则拒绝
+		reply.VoteGranted = false
+		reply.Term = rf.term
+	}
+	rf.logger.Printf("(%d){%d}[RequestVote] response {%v} done, current term: %d\n", rf.me, rf.term, reply.VoteGranted,rf.term)
 }
 func (rf *Raft) RequestHeartbeat(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()  // 使用 defer 确保锁一定会被解锁
 
 	// 更新最后一次心跳时间
 	rf.lastHeartbeat = time.Now()
 
+	reply.Success = true
 	// 如果接收到的任期大于当前任期，则更新状态
+	rf.logger.Printf("(%d){%d}[RequestHeartbeat] current term: %d, heartbeat term: %d\n", rf.me, rf.term, rf.term, args.Term)
 	if args.Term > rf.term {
-		rf.state = 0  // 假设 state = 0 表示跟随者
+		rf.logger.Printf("(%d){%d}[RequestHeartbeat] updating term%d ,leader: %d!\n", rf.me, rf.term, args.Term, args.LeaderId)
+		rf.state = 0 // 假设 state = 0 表示跟随者
 		rf.term = args.Term
-		rf.leader = args.LeaderId
+		rf.LeaderId = args.LeaderId
+	}
+	if args.Term < rf.term {
+		reply.Term = rf.term
+		reply.Success = false
 	}
 
 	// 记录日志
-	rf.logger.Printf("(%d){%d}[RequestHeartbeat]term: %d, leader: %d,current leader %d\n",
-		rf.me, rf.term, rf.term, args.LeaderId, rf.leader)
+	rf.logger.Printf("(%d){%d}[RequestHeartbeat] term: %d, leader: %d==current leader %d\n",
+		rf.me, rf.term, rf.term, args.LeaderId, rf.LeaderId)
 
+	rf.mu.Unlock()
 	// 可以在这里更新 reply 结构体，根据具体协议需求添加必要的信息
 }
 
@@ -240,11 +264,21 @@ func (rf *Raft) RequestHeartbeat(args *AppendEntriesArgs, reply *AppendEntriesRe
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	rf.logger.Printf("(%d){%d}[sendRequestVote]node send vote: %d -----> %d\n", rf.me, rf.term, rf.me, server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	rf.mu.Lock()
+	rf.logger.Printf("(%d){%d}[sendRequestVote]node send vote: %d -----> %d\n", rf.me, rf.term, rf.me, server)
+	if !ok {
+		rf.logger.Printf("(%d){%d}[sendRequestVote] WARNING: Vote request to %d failed\n", rf.me, rf.term, server)
+		// Here, you might want to handle the failure, e.g., retry the RPC, handle the server as unreachable, etc.
+	}
+	rf.mu.Unlock()
 	return ok
 }
 func (rf *Raft) sendHeartbeat(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	rf.mu.Lock()
+	rf.logger.Printf("(%d){%d}[sendHeartbeat] node heartbeat %d == %d ---> %d\n",
+		rf.me, rf.term, args.LeaderId, rf.me, server)
+	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.RequestHeartbeat", args, reply)
 	return ok
 }
@@ -297,13 +331,13 @@ func (rf *Raft) ticker() {
 	heartbeatTimeout := 1 * time.Second
 
 	for !rf.killed() {
-		time.Sleep(time.Duration(400+rand.Intn(150)) * time.Millisecond)
+		time.Sleep(time.Duration(baseDelay+rand.Intn(150)) * time.Millisecond)
 
 		rf.mu.Lock()
 		elapsed := time.Since(rf.lastHeartbeat)
 		isTimeout := elapsed >= heartbeatTimeout
 		rf.logger.Printf("(%d){%d}[ticker] current state: %d, leader %d, term %d, elapsed since last heartbeat: %v\n",
-			rf.me, rf.term, rf.state, rf.leader, rf.term, elapsed)
+			rf.me, rf.term, rf.state, rf.LeaderId, rf.term, elapsed)
 		rf.mu.Unlock()
 
 		if rf.state != 1 && isTimeout {
@@ -319,12 +353,14 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) startVote() {
-	var wg sync.WaitGroup
 
 	rf.mu.Lock()
-	rf.term++
+	voteTerm := rf.term + 1
+	rf.term = voteTerm
+	voteCandidate := rf.me
 	rf.voteCount = 1
-	// rf.leader = rf.me
+	rf.lastHeartbeat = time.Now()
+	rf.logger.Printf("(%d){%d}[startVote]Vote start\n", rf.me, rf.term)
 	rf.mu.Unlock()
 
 	for i := range rf.peers {
@@ -332,24 +368,23 @@ func (rf *Raft) startVote() {
 			continue
 		}
 
-		wg.Add(1)
 		go func(i int) {
-			defer wg.Done() // Ensure the WaitGroup counter decrements on goroutine completion.
 
 			args := &RequestVoteArgs{
-				Term:         rf.term,
-				CandidateId:  rf.me,
+				Term:         voteTerm,
+				CandidateId:  voteCandidate,
 				LastLogIndex: 0,
 				LastLogTerm:  0,
 			}
 			reply := &RequestVoteReply{}
 
-			rf.sendRequestVote(i, args, reply)
-
+			if !rf.sendRequestVote(i, args, reply) {
+				return
+			}
 			rf.mu.Lock()
 			if reply.Term > rf.term {
 				rf.term = reply.Term
-				rf.state = 0 // Assume state 0 is follower.
+				rf.state = follower
 			}
 			if reply.VoteGranted {
 				rf.voteCount++
@@ -358,9 +393,11 @@ func (rf *Raft) startVote() {
 		}(i)
 	}
 
-	wg.Wait() // Wait for all voting goroutines to finish.
 
+	time.Sleep(1 * time.Second)
+	rf.mu.Lock()
 	rf.logger.Printf("(%d){%d}[startVote]Vote end, term %d got %d\n", rf.me, rf.term, rf.term, rf.voteCount)
+	rf.mu.Unlock()
 	if rf.voteCount > len(rf.peers)/2 {
 		rf.convertToLeader()
 	}
@@ -373,6 +410,9 @@ func (rf *Raft) heartbeatAll() {
 		if i == rf.me {
 			continue
 		}
+		if rf.state != 1 {
+			return
+		}
 		go func(i int) {
 			args := &AppendEntriesArgs{}
 			reply := &AppendEntriesReply{}
@@ -381,12 +421,20 @@ func (rf *Raft) heartbeatAll() {
 			args.LeaderId = rf.me
 			args.PrevLogIndex = 0 // TODO: log later
 			args.PrevLogTerm = 0
-			rf.logger.Printf("(%d){%d}[heartbeat] node heartbeat %d %d ---> %d\n",
-				rf.me, rf.term, args.LeaderId, rf.me, i)
 			rf.mu.Unlock()
 			rf.sendHeartbeat(i, args, reply)
+			if !reply.Success {
+				rf.mu.Lock()
+				if reply.Term > rf.term {
+					rf.term = reply.Term
+					rf.state = 0
+					// TODO: check other state
+				}
+				rf.mu.Unlock()
+			}
 			rf.mu.Lock()
 			if reply.Term > rf.term {
+				rf.logger.Printf("(%d){%d}[heartbeatAll] term %d < %d become follower again.\n", rf.me, rf.term, rf.term, reply.Term)
 				rf.term = reply.Term
 				rf.state = 0
 			}
@@ -401,7 +449,7 @@ func (rf *Raft) convertToLeader() {
 	rf.mu.Lock()
 	rf.logger.Printf("(%d)[convertToLeader] LEADER \n", rf.me)
 	rf.state = 1
-	rf.leader = rf.me
+	rf.LeaderId = rf.me
 	rf.mu.Unlock()
 	// rf.lastHeartbeat = time.Now()
 }
@@ -464,6 +512,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.Core()
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.votedFor = make(map[int]int)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
