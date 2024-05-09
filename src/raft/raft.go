@@ -41,9 +41,9 @@ import (
 // in part 2D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
-var follower = 0
-var leader = 1
-var candidate = 2
+var FOLLOWER = 0
+var LEADER = 1
+var CANDIDATE = 2
 var baseDelay = 300
 
 type ApplyMsg struct {
@@ -184,21 +184,28 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 
 	rf.lastHeartbeat = time.Now()
-	rf.logger.Printf("(%d){%d}[RequestVote] node %d  receive request-vote %d ----> %d term: %d\n", rf.me, rf.term, rf.me, args.CandidateId, rf.me, args.Term)
+	rf.logger.Printf("(%d){%d}[RequestVote] node %d receive request-vote from %d term: %d\n", rf.me, rf.term, rf.me, args.CandidateId, args.Term)
 
-	// 拒绝投票的情况
-	if rf.term >= args.Term {
+	// 拒绝投票的情况：请求的任期不高于当前任期
+	if rf.term > args.Term {
 		reply.VoteGranted = false
 		reply.Term = rf.term
 		return
 	}
 
-	// 考虑投票的情况
-	currentVote, votedThisTerm := rf.votedFor[args.Term]
-	if args.Term > rf.term || !votedThisTerm || currentVote == args.CandidateId {
+	// 更新任期和状态，转变为跟随者
+	if args.Term > rf.term {
 		rf.term = args.Term
-		rf.votedFor[args.Term] = args.CandidateId  // 更新当前任期的投票记录
-		rf.state = follower                        // 切换状态为follower
+		rf.state = FOLLOWER // 假设 state = 0 表示跟随者
+		reply.VoteGranted = true
+		rf.votedFor[args.Term] = args.CandidateId
+		rf.logger.Printf("(%d){%d}[RequestVote] term updated to %d, state changed to %d\n", rf.me, rf.term, rf.term, rf.state)
+	}
+
+	// 考虑授予投票的条件
+	currentVote, votedThisTerm := rf.votedFor[args.Term]
+	if !votedThisTerm || currentVote == args.CandidateId {
+		rf.votedFor[args.Term] = args.CandidateId
 		reply.VoteGranted = true
 		reply.Term = rf.term
 	} else {
@@ -206,34 +213,33 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		reply.Term = rf.term
 	}
-	rf.logger.Printf("(%d){%d}[RequestVote] response {%v} done, current term: %d\n", rf.me, rf.term, reply.VoteGranted,rf.term)
+
 }
+
 func (rf *Raft) RequestHeartbeat(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock() // 使用 defer 确保锁会被释放
 
-	// 更新最后一次心跳时间
 	rf.lastHeartbeat = time.Now()
-
 	reply.Success = true
-	// 如果接收到的任期大于当前任期，则更新状态
-	rf.logger.Printf("(%d){%d}[RequestHeartbeat] current term: %d, heartbeat term: %d\n", rf.me, rf.term, rf.term, args.Term)
+
 	if args.Term > rf.term {
-		rf.logger.Printf("(%d){%d}[RequestHeartbeat] updating term%d ,leader: %d!\n", rf.me, rf.term, args.Term, args.LeaderId)
+		rf.logger.Printf("(%d){%d}[RequestHeartbeat] Updating term from %d to %d, new leader: %d\n",
+			rf.me, rf.term, rf.term, args.Term, args.LeaderId)
 		rf.state = 0 // 假设 state = 0 表示跟随者
 		rf.term = args.Term
 		rf.LeaderId = args.LeaderId
-	}
-	if args.Term < rf.term {
+	} else if args.Term < rf.term {
 		reply.Term = rf.term
 		reply.Success = false
+	} else if args.LeaderId != rf.LeaderId {
+		rf.logger.Printf("(%d){%d}[RequestHeartbeat] Correcting leader from %d to %d under same term %d\n",
+			rf.me, rf.term, rf.LeaderId, args.LeaderId, rf.term)
+		rf.LeaderId = args.LeaderId
 	}
 
-	// 记录日志
-	rf.logger.Printf("(%d){%d}[RequestHeartbeat] term: %d, leader: %d==current leader %d\n",
+	rf.logger.Printf("(%d){%d}[RequestHeartbeat] term: %d, leader: %d, current leader %d\n",
 		rf.me, rf.term, rf.term, args.LeaderId, rf.LeaderId)
-
-	rf.mu.Unlock()
-	// 可以在这里更新 reply 结构体，根据具体协议需求添加必要的信息
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -264,9 +270,11 @@ func (rf *Raft) RequestHeartbeat(args *AppendEntriesArgs, reply *AppendEntriesRe
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	rf.mu.Lock()
 	rf.logger.Printf("(%d){%d}[sendRequestVote]node send vote: %d -----> %d\n", rf.me, rf.term, rf.me, server)
+	rf.mu.Unlock()
+	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	rf.mu.Lock()
 	if !ok {
 		rf.logger.Printf("(%d){%d}[sendRequestVote] WARNING: Vote request to %d failed\n", rf.me, rf.term, server)
 		// Here, you might want to handle the failure, e.g., retry the RPC, handle the server as unreachable, etc.
@@ -359,8 +367,10 @@ func (rf *Raft) startVote() {
 	rf.term = voteTerm
 	voteCandidate := rf.me
 	rf.voteCount = 1
+	rf.state = CANDIDATE
 	rf.lastHeartbeat = time.Now()
 	rf.logger.Printf("(%d){%d}[startVote]Vote start\n", rf.me, rf.term)
+	rf.votedFor[voteTerm] = voteCandidate
 	rf.mu.Unlock()
 
 	for i := range rf.peers {
@@ -384,7 +394,7 @@ func (rf *Raft) startVote() {
 			rf.mu.Lock()
 			if reply.Term > rf.term {
 				rf.term = reply.Term
-				rf.state = follower
+				rf.state = FOLLOWER
 			}
 			if reply.VoteGranted {
 				rf.voteCount++
@@ -393,12 +403,12 @@ func (rf *Raft) startVote() {
 		}(i)
 	}
 
-
 	time.Sleep(1 * time.Second)
 	rf.mu.Lock()
 	rf.logger.Printf("(%d){%d}[startVote]Vote end, term %d got %d\n", rf.me, rf.term, rf.term, rf.voteCount)
+	enoughVotes := rf.voteCount > len(rf.peers)/2
 	rf.mu.Unlock()
-	if rf.voteCount > len(rf.peers)/2 {
+	if enoughVotes {
 		rf.convertToLeader()
 	}
 	rf.logger.Printf("(%d)[startVote]checked:%v\n", rf.me, rf.isLeader())
@@ -410,9 +420,11 @@ func (rf *Raft) heartbeatAll() {
 		if i == rf.me {
 			continue
 		}
+		rf.mu.Lock()
 		if rf.state != 1 {
 			return
 		}
+		rf.mu.Unlock()
 		go func(i int) {
 			args := &AppendEntriesArgs{}
 			reply := &AppendEntriesReply{}
@@ -447,9 +459,14 @@ func (rf *Raft) heartbeatAll() {
 }
 func (rf *Raft) convertToLeader() {
 	rf.mu.Lock()
-	rf.logger.Printf("(%d)[convertToLeader] LEADER \n", rf.me)
-	rf.state = 1
-	rf.LeaderId = rf.me
+	if rf.state == CANDIDATE {
+		rf.logger.Printf("(%d){%d}[convertToLeader] LEADER \n", rf.me, rf.term)
+		rf.state = 1
+		rf.LeaderId = rf.me
+	} else {
+		rf.logger.Printf("(%d){%d}[convertToLeader] State changed to%d\n", rf.me, rf.term, rf.state)
+	}
+
 	rf.mu.Unlock()
 	// rf.lastHeartbeat = time.Now()
 }
