@@ -96,8 +96,8 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term      int
-	Success   bool
+	Term    int
+	Success bool
 }
 
 type LogEntry struct {
@@ -230,6 +230,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	defer rf.logger.Printf("(%d){%d}[AppendEntries] term: %d, leader: %d, current leader %d\n",
 		rf.me, rf.term, rf.term, args.LeaderId, rf.LeaderId)
 
@@ -242,18 +243,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.state = 0 // 假设 state = 0 表示跟随者
 		rf.term = args.Term
 		rf.LeaderId = args.LeaderId
-		rf.mu.Unlock()
 		return
 	} else if args.Term < rf.term {
 		reply.Term = rf.term
 		reply.Success = false
-		rf.mu.Unlock()
 		return
 	} else if args.LeaderId != rf.LeaderId {
 		rf.logger.Printf("(%d){%d}[AppendEntries] Correcting leader from %d to %d under same term %d\n",
 			rf.me, rf.term, rf.LeaderId, args.LeaderId, rf.term)
 		rf.LeaderId = args.LeaderId
-		rf.mu.Unlock()
 		return
 	}
 	// TODO: handel entries
@@ -269,7 +267,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.commitIndex = args.PrevLogIndex
 
 	reply.Success = true
-	rf.mu.Unlock() 
 	rf.applyEntries()
 }
 
@@ -559,8 +556,6 @@ func (rf *Raft) convertToLeader() {
 	// rf.lastHeartbeat = time.Now()
 }
 func (rf *Raft) applyEntries() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	if rf.commitIndex > rf.lastApplied {
 		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 			rf.logger.Printf("(%d){%d}[applyEntries] Applying command %v at index %d\n", rf.me, rf.term, rf.Log[i].Command, i)
@@ -574,8 +569,8 @@ func (rf *Raft) applyEntries() {
 			rf.logger.Printf("(%d){%d}[applyEntries] Sending ApplyMsg: %v\n", rf.me, rf.term, msg)
 			rf.applyCh <- msg
 		}
-	}else{
-		rf.logger.Printf("(%d){%d}[applyEntries] No entries applied\n",rf.me,rf.term)
+	} else {
+		rf.logger.Printf("(%d){%d}[applyEntries] No entries applied\n", rf.me, rf.term)
 	}
 
 }
