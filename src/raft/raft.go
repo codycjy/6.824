@@ -45,7 +45,7 @@ import (
 var FOLLOWER = 0
 var LEADER = 1
 var CANDIDATE = 2
-var baseDelay = 250 
+var baseDelay = 300 
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -114,7 +114,7 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	rf.mu.Lock()
 	term = rf.term
-	isleader = rf.state == 1
+	isleader = rf.state == LEADER
 	rf.mu.Unlock()
 	return term, isleader
 }
@@ -397,7 +397,7 @@ func (rf *Raft) ticker() {
 	heartbeatTimeout := 1 * time.Second
 
 	for !rf.killed() {
-		time.Sleep(time.Duration(baseDelay+rand.Intn(150)) * time.Millisecond)
+		time.Sleep(time.Duration(baseDelay+rand.Intn(50)) * time.Millisecond)
 
 		rf.mu.Lock()
 		elapsed := time.Since(rf.lastHeartbeat)
@@ -412,7 +412,7 @@ func (rf *Raft) ticker() {
 		}
 
 		if rf.isLeader() {
-			rf.heartbeatAll()
+			rf.broadcastAppendEntries()
 		}
 
 	}
@@ -470,137 +470,114 @@ func (rf *Raft) startVote() {
 		rf.convertToLeader()
 	}
 	rf.logger.Printf("(%d)[startVote]checked:%v\n", rf.me, rf.isLeader())
+	rf.broadcastAppendEntries()
 
 }
 
-func (rf *Raft) heartbeatAll() {
-	rf.mu.Lock()
-	commitIndex := rf.commitIndex
-	prevLogIndex := len(rf.Log) - 1
-	prevLogTerm := rf.Log[prevLogIndex].Term
-	rf.logger.Printf("(%d){%d}[heartbeatAll] node %d heartbeat,commitIndex %d, prevLogIndex %d,pervLogTerm %d\n",
-		rf.me, rf.term, rf.me, commitIndex, prevLogIndex, prevLogTerm)
-	rf.mu.Unlock()
-	for i := 0; i < len(rf.peers); i++ {
-		if i == rf.me {
-			continue
-		}
-		rf.mu.Lock()
-		if rf.state != LEADER {
-			return
-		}
-		rf.mu.Unlock()
-		go func(i int) {
-			args := &AppendEntriesArgs{}
-			reply := &AppendEntriesReply{}
-			rf.mu.Lock()
-			args.Term = rf.term
-			args.LeaderId = rf.me
-			args.LeaderCommit = commitIndex
-
-			prevLogIndex := rf.nextIndex[i] - 1
-			prevLogTerm := 0
-			if prevLogIndex >= 0 {
-				prevLogTerm = rf.Log[prevLogIndex].Term
-			}
-
-			args.PrevLogIndex = prevLogIndex
-			args.PrevLogTerm = prevLogTerm
-			rf.mu.Unlock()
-			rf.sendAppendEntries(i, args, reply)
-			if !reply.Success {
-				rf.mu.Lock()
-				if reply.Term > rf.term {
-					rf.term = reply.Term
-					rf.state = 0
-					// TODO: check other state
-				}else{
-					rf.nextIndex[i]--
-				}
-				
-				rf.mu.Unlock()
-			}
-			rf.mu.Lock()
-			if reply.Term > rf.term {
-				rf.logger.Printf("(%d){%d}[heartbeatAll] term %d < %d become follower again.\n", rf.me, rf.term, rf.term, reply.Term)
-				rf.term = reply.Term
-				rf.state = 0
-			}
-			rf.mu.Unlock()
-		}(i)
-	}
-	rf.mu.Lock()
-	rf.lastHeartbeat = time.Now()
-	rf.mu.Unlock()
-}
 
 func (rf *Raft) broadcastAppendEntries() {
 	rf.mu.Lock()
-	rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d broadcast, current commitIndex %d\n", rf.me, rf.term, rf.me, rf.commitIndex)
 	term := rf.term
 	leader := rf.me
 	commitIndex := rf.commitIndex
-	var wg sync.WaitGroup
-
+	rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d broadcast, current commitIndex %d\n", rf.me, rf.term, rf.me, commitIndex)
 	rf.mu.Unlock()
+
+
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
-		wg.Add(1)
 		go func(i int) {
 			rf.mu.Lock()
 			log := []LogEntry{}
-			for j := rf.nextIndex[i]; j < len(rf.Log); j++ {
+			for j := max(0,rf.nextIndex[i]); j < len(rf.Log); j++ {
 				if rf.Log[j].Command != nil {
 					log = append(log, rf.Log[j])
 				}
 			}
-			rf.logger.Printf("(%d){%d}[broadcastAppendEntries] log for node %d: %v\n", rf.me, rf.term, i,log)
-			rf.mu.Unlock()
-			args := &AppendEntriesArgs{}
-			reply := &AppendEntriesReply{}
-			args.Term = term
-			args.LeaderId = leader
-			args.PrevLogIndex = rf.nextIndex[i] - 1
-			if args.PrevLogIndex >= 0 { //WARNING: high risk
+			rf.logger.Printf("(%d){%d}[broadcastAppendEntries] log for node %d: %v\n", rf.me, rf.term, i, log)
+			args := &AppendEntriesArgs{
+				Term:         term,
+				LeaderId:     leader,
+				PrevLogIndex: rf.nextIndex[i] - 1,
+				Entries:      log,
+				LeaderCommit: commitIndex,
+			}
+			if args.PrevLogIndex >= 0 {
 				args.PrevLogTerm = rf.Log[args.PrevLogIndex].Term
 			} else {
 				args.PrevLogTerm = 0
 			}
-			args.Entries = log
-			args.LeaderCommit = commitIndex
+			rf.mu.Unlock()
+
+			reply := &AppendEntriesReply{}
 			ok := rf.sendAppendEntries(i, args, reply)
-			rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d ok: %v, reply.Success: %v\n", rf.me, rf.term, i, ok, reply.Success)
-			if ok && reply.Success {
+			rf.mu.Lock()
+			rf.logger.Printf("(%d){%d}[broadcastAppendEntries] reply from node %d isOK: %v\n", rf.me, rf.term, i, ok)
+			rf.mu.Unlock()
+			if !ok {
 				rf.mu.Lock()
-				rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d success\n", rf.me, rf.term, i)
-				rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
-				rf.nextIndex[i] = rf.matchIndex[i] + 1
+				rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d failed\n", rf.me, rf.term, i)
 				rf.mu.Unlock()
+				return
 			}
-			wg.Done()
+			rf.mu.Lock()
+			rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d ok: %v, reply.Success: %v\n", rf.me, rf.term, i, ok, reply.Success)
+			rf.mu.Unlock()
+			rf.handleAppendEntriesResponse(i, args, reply, ok)
+			rf.mu.Lock()
+			rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d done\n", rf.me, rf.term, i)
+			rf.mu.Unlock()
 		}(i)
 	}
-	wg.Wait()
+	time.Sleep(400* time.Microsecond)
+	rf.mu.Lock()
+	rf.logger.Printf("(%d){%d}[broadcastAppendEntries] all nodes done\n", rf.me, rf.term)
+	rf.mu.Unlock()
 
+	rf.updateCommitIndex()
+}
+
+func (rf *Raft) handleAppendEntriesResponse(i int, args *AppendEntriesArgs, reply *AppendEntriesReply, ok bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// 尝试更新 commitIndex
-	copyMatchIndex := make([]int, len(rf.matchIndex))
-	rf.logger.Printf("(%d){%d}[broadcastAppendEntries]nextIndex: %v\n", rf.me, rf.term, rf.nextIndex)
-	copy(copyMatchIndex, rf.matchIndex)
-	sort.Ints(copyMatchIndex)                                   // 从小到大排序
-	newCommitIndex := copyMatchIndex[(len(copyMatchIndex)-1)/2] // 多数投票的位置
-	rf.logger.Printf("(%d){%d}[broadcastAppendEntries]sorted matchIndex: %v\n", rf.me, rf.term, copyMatchIndex)
-	rf.logger.Printf("(%d){%d}[broadcastAppendEntries]newCommitIndex: %d\n", rf.me, rf.term, newCommitIndex)
-	if rf.commitIndex < newCommitIndex {
-		rf.logger.Printf("(%d){%d}[broadcastAppendEntries]Updating commitIndex from %d to %d\n", rf.me, rf.term, rf.commitIndex, newCommitIndex)
-		rf.commitIndex = newCommitIndex
+	if !ok {
+		rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d failed, decrement nextIndex\n", rf.me, rf.term, i)
+		rf.nextIndex[i] = max(1, rf.nextIndex[i]-1)
+		return
 	}
 
-	rf.logger.Printf("(%d){%d}[broadcastAppendEntries]newCommitIndex: %d\n", rf.me, rf.term, rf.commitIndex)
-	rf.applyEntries()
+	if reply.Success {
+		rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d success, updating matchIndex and nextIndex\n", rf.me, rf.term, i)
+		rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
+		rf.nextIndex[i] = rf.matchIndex[i] + 1
+	} else if reply.Term > rf.term {
+		rf.logger.Printf("(%d){%d}[broadcastAppendEntries] term %d < %d become follower again.\n", rf.me, rf.term, rf.term, reply.Term)
+		rf.term = reply.Term
+		rf.state = 0 // Assume 0 is follower
+	} else {
+		rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d append failed, decrement nextIndex\n", rf.me, rf.term, i)
+		rf.nextIndex[i]--
+	}
+}
+
+
+func (rf *Raft) updateCommitIndex() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	copyMatchIndex := make([]int, len(rf.matchIndex))
+	copy(copyMatchIndex, rf.matchIndex)
+	sort.Ints(copyMatchIndex)
+	newCommitIndex := copyMatchIndex[(len(copyMatchIndex)-1)/2]
+	rf.logger.Printf("(%d){%d}[broadcastAppendEntries] sorted matchIndex: %v\n", rf.me, rf.term, copyMatchIndex)
+	rf.logger.Printf("(%d){%d}[broadcastAppendEntries] newCommitIndex: %d\n", rf.me, rf.term, newCommitIndex)
+	if rf.commitIndex < newCommitIndex {
+		rf.logger.Printf("(%d){%d}[broadcastAppendEntries] Updating commitIndex from %d to %d\n", rf.me, rf.term, rf.commitIndex, newCommitIndex)
+		rf.commitIndex = newCommitIndex
+		rf.applyEntries()
+	}
+	rf.logger.Printf("(%d){%d}[broadcastAppendEntries] final commitIndex: %d\n", rf.me, rf.term, rf.commitIndex)
 }
 
 func (rf *Raft) convertToLeader() {
