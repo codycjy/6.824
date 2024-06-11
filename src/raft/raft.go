@@ -382,7 +382,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
+	rf.mu.Lock()
 	rf.logger.Printf("(%d){%d}[Kill]", rf.me, rf.term)
+	rf.mu.Unlock()
 	// Your code here, if desired.
 }
 
@@ -406,8 +408,11 @@ func (rf *Raft) ticker() {
 			rf.me, rf.term, rf.state, rf.LeaderId, rf.term, elapsed)
 		rf.mu.Unlock()
 
-		if rf.state != LEADER && isTimeout {
+		isLeader:=rf.isLeader()
+		if !isLeader&& isTimeout {
+			rf.mu.Lock()
 			rf.logger.Printf("(%d){%d}[ticker] Heartbeat timeout for node %d. Starting election.\n", rf.me, rf.term, rf.me)
+			rf.mu.Unlock()
 			rf.startVote()
 		}
 
