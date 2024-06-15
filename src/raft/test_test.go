@@ -8,12 +8,14 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -59,9 +61,15 @@ func TestReElection2A(t *testing.T) {
 
 	leader1 := cfg.checkOneLeader()
 
+	fmt.Println("___________")
+	fmt.Println("Stage 1 Passed")
+
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
+
+	fmt.Println("___________")
+	fmt.Println("Stage 2 Passed")
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader. and the old leader
@@ -69,23 +77,34 @@ func TestReElection2A(t *testing.T) {
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
 
+	fmt.Println("___________")
+	fmt.Println("Stage 3 Passed")
+
 	// if there's no quorum, no new leader should
 	// be elected.
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
+	fmt.Println("___________")
+	fmt.Println("Stage 4 Passed")
 
 	// check that the one connected server
 	// does not think it is the leader.
 	cfg.checkNoLeader()
+	fmt.Println("___________")
+	fmt.Println("Stage 5 Passed")
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
+	fmt.Println("___________")
+	fmt.Println("Stage 6 Passed")
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
 	cfg.checkOneLeader()
+	fmt.Println("___________")
+	fmt.Println("Stage 7 Passed")
 
 	cfg.end()
 }
@@ -133,6 +152,7 @@ func TestBasicAgree2B(t *testing.T) {
 	iters := 3
 	for index := 1; index < iters+1; index++ {
 		nd, _ := cfg.nCommitted(index)
+		t.Logf("Current running %d log",index)
 		if nd > 0 {
 			t.Fatalf("some have committed before Start()")
 		}

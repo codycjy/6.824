@@ -8,20 +8,24 @@ package raft
 // test with the original before submitting.
 //
 
-import "6.824/labgob"
-import "6.824/labrpc"
-import "bytes"
-import "log"
-import "sync"
-import "sync/atomic"
-import "testing"
-import "runtime"
-import "math/rand"
-import crand "crypto/rand"
-import "math/big"
-import "encoding/base64"
-import "time"
-import "fmt"
+import (
+	"bytes"
+	"log"
+	"math/rand"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"time"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -442,7 +446,7 @@ func (cfg *config) checkOneLeader() int {
 		lastTermWithLeader := -1
 		for term, leaders := range leaders {
 			if len(leaders) > 1 {
-				cfg.t.Fatalf("term %d has %d (>1) leaders", term, len(leaders))
+				cfg.t.Fatalf("term %d has %d (>1) leaders: %v", term, len(leaders), leaders)
 			}
 			if term > lastTermWithLeader {
 				lastTermWithLeader = term
@@ -458,6 +462,21 @@ func (cfg *config) checkOneLeader() int {
 }
 
 // check that everyone agrees on the term.
+// func (cfg *config) checkTerms() int { //WARN: Original
+// 	term := -1
+// 	for i := 0; i < cfg.n; i++ {
+// 		if cfg.connected[i] {
+// 			xterm, _ := cfg.rafts[i].GetState()
+// 			if term == -1 {
+// 				term = xterm
+// 			} else if term != xterm {
+// 				cfg.t.Fatalf("servers disagree on term")
+// 			}
+// 		}
+// 	}
+// 	return term
+// }
+
 func (cfg *config) checkTerms() int {
 	term := -1
 	for i := 0; i < cfg.n; i++ {
@@ -466,7 +485,9 @@ func (cfg *config) checkTerms() int {
 			if term == -1 {
 				term = xterm
 			} else if term != xterm {
-				cfg.t.Fatalf("servers disagree on term")
+				cfg.t.Fatalf("servers disagree on term: server %d has term %d, but server %d has term %d", i, xterm, i-1, term)
+				// You might need to store and retrieve the previous node ID and term in case of a mismatch
+				// This example assumes the previous node immediately before the current one has the mismatch which might not always be the case
 			}
 		}
 	}
@@ -478,6 +499,7 @@ func (cfg *config) checkTerms() int {
 func (cfg *config) checkNoLeader() {
 	for i := 0; i < cfg.n; i++ {
 		if cfg.connected[i] {
+			fmt.Println("Checking if server ", i, " is leader")
 			_, is_leader := cfg.rafts[i].GetState()
 			if is_leader {
 				cfg.t.Fatalf("expected no leader among connected servers, but %v claims to be leader", i)
@@ -570,6 +592,9 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			cfg.mu.Unlock()
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
+				cfg.mu.Lock()
+				// cfg.t.Logf("Trying to start command on server %d: index=%d, ok=%v", starts, index1, ok)
+				cfg.mu.Unlock()
 				if ok {
 					index = index1
 					break
@@ -583,10 +608,16 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+				cfg.mu.Lock()
+				// cfg.t.Logf("Checking if command committed at index %d: nd=%d, cmd1=%v", index, nd, cmd1)
+				cfg.mu.Unlock()
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {
 						// and it was the command we submitted.
+						cfg.mu.Lock()
+						// cfg.t.Logf("Command %v successfully committed at index %d on %d servers", cmd, index, nd)
+						cfg.mu.Unlock()
 						return index
 					}
 				}

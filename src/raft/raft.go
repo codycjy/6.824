@@ -45,7 +45,7 @@ import (
 var FOLLOWER = 0
 var LEADER = 1
 var CANDIDATE = 2
-var baseDelay = 300
+var baseDelay = 250
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -265,16 +265,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	}
 	if args.PrevLogIndex >= 0 && rf.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		rf.logger.Printf("(%d){%d}[AppendEntries] Log mismatch at index %d, args.PrevLogIndex: %d, args.PrevLogTerm: %d\n",
+		rf.logger.Printf("(%d){%d}[AppendEntries] Log mismatch at index %d, args.PrevLogIndex: %d, args. PrevLogTerm: %d\n",
 			rf.me, rf.term, args.PrevLogIndex, args.PrevLogIndex, args.PrevLogTerm)
 		reply.Success = false
 		return
 	}
-	if len(args.Entries) > 0 {
-		rf.logger.Printf("(%d){%d}[AppendEntries] Received %d entries from leader %d\n",
-			rf.me, rf.term, len(args.Entries), args.LeaderId)
-		rf.Log = append(rf.Log, args.Entries...)
-	}
+
+	rf.Log = append(rf.Log[:args.PrevLogIndex+1], args.Entries...)
+
 	rf.logger.Printf("(%d){%d}[AppendEntries] Log after appending: %v\n", rf.me, rf.term, rf.Log)
 	rf.logger.Printf("(%d){%d}[AppendEntries] CommitIndex: %d, LeaderCommit: %d\n", rf.me, rf.term, rf.commitIndex, args.LeaderCommit)
 	rf.commitIndex = args.LeaderCommit
@@ -325,8 +323,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	rf.mu.Lock()
-	rf.logger.Printf("(%d){%d}[sendHeartbeat] node heartbeat %d == %d ---> %d\n",
-		rf.me, rf.term, args.LeaderId, rf.me, server)
+	rf.logger.Printf("(%d){%d}[sendHeartbeat] node heartbeat %d == %d ---> %d\n", rf.me, rf.term, args.LeaderId, rf.me, server)
 	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if !ok {
@@ -365,6 +362,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.Log = append(rf.Log, LogEntry{term, command})
 	index = len(rf.Log) - 1
 	rf.logger.Printf("(%d){%d}[Start] node %d start agreement on command %v index %d\n", rf.me, rf.term, rf.me, command, index)
+	rf.nextIndex[rf.me] = index + 1
+	rf.matchIndex[rf.me] = index
 	rf.mu.Unlock()
 	go rf.broadcastAppendEntries()
 
@@ -404,8 +403,7 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock()
 		elapsed := time.Since(rf.lastHeartbeat)
 		isTimeout := elapsed >= heartbeatTimeout
-		rf.logger.Printf("(%d){%d}[ticker] current state: %d, leader %d, term %d, elapsed since last heartbeat: %v\n",
-			rf.me, rf.term, rf.state, rf.LeaderId, rf.term, elapsed)
+		rf.logger.Printf("(%d){%d}[ticker] current state: %d, leader %d, term %d, elapsed since last heartbeat: %v\n", rf.me, rf.term, rf.state, rf.LeaderId, rf.term, elapsed)
 		rf.mu.Unlock()
 
 		isLeader := rf.isLeader()
@@ -484,6 +482,7 @@ func (rf *Raft) broadcastAppendEntries() {
 	term := rf.term
 	leader := rf.me
 	commitIndex := rf.commitIndex
+	// rf.lastHeartbeat = time.Now()
 	rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d broadcast, current commitIndex %d\n", rf.me, rf.term, rf.me, commitIndex)
 	rf.mu.Unlock()
 
@@ -491,9 +490,18 @@ func (rf *Raft) broadcastAppendEntries() {
 		if i == rf.me {
 			continue
 		}
+		isLeader := rf.isLeader()
+		if !isLeader {
+			rf.mu.Lock()
+			rf.logger.Printf("(%d){%d}[broadcastAppendEntries] Not leader, breaking\n", rf.me, rf.term)
+			rf.mu.Unlock()
+			break
+		}
+
 		go func(i int) {
 			rf.mu.Lock()
 			log := []LogEntry{}
+			rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d nextIndex: %d\n", rf.me, rf.term, i, rf.nextIndex[i])
 			for j := max(0, rf.nextIndex[i]); j < len(rf.Log); j++ {
 				if rf.Log[j].Command != nil {
 					log = append(log, rf.Log[j])
@@ -507,6 +515,7 @@ func (rf *Raft) broadcastAppendEntries() {
 				Entries:      log,
 				LeaderCommit: commitIndex,
 			}
+			rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d PrevLogIndex: %d\n", rf.me, rf.term, i, args.PrevLogIndex)
 			if args.PrevLogIndex >= 0 {
 				args.PrevLogTerm = rf.Log[args.PrevLogIndex].Term
 			} else {
@@ -516,9 +525,6 @@ func (rf *Raft) broadcastAppendEntries() {
 
 			reply := &AppendEntriesReply{}
 			ok := rf.sendAppendEntries(i, args, reply)
-			rf.mu.Lock()
-			rf.logger.Printf("(%d){%d}[broadcastAppendEntries] reply from node %d isOK: %v\n", rf.me, rf.term, i, ok)
-			rf.mu.Unlock()
 			if !ok {
 				rf.mu.Lock()
 				rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d failed\n", rf.me, rf.term, i)
@@ -528,7 +534,7 @@ func (rf *Raft) broadcastAppendEntries() {
 			rf.mu.Lock()
 			rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d ok: %v, reply.Success: %v\n", rf.me, rf.term, i, ok, reply.Success)
 			rf.mu.Unlock()
-			rf.handleAppendEntriesResponse(i, args, reply, ok)
+			rf.handleAppendEntriesResponse(i, args, reply)
 			rf.mu.Lock()
 			rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d done\n", rf.me, rf.term, i)
 			rf.mu.Unlock()
@@ -542,26 +548,22 @@ func (rf *Raft) broadcastAppendEntries() {
 	rf.updateCommitIndex()
 }
 
-func (rf *Raft) handleAppendEntriesResponse(i int, args *AppendEntriesArgs, reply *AppendEntriesReply, ok bool) {
+func (rf *Raft) handleAppendEntriesResponse(i int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if !ok {
-		rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d failed, decrement nextIndex\n", rf.me, rf.term, i)
-		rf.nextIndex[i] = max(1, rf.nextIndex[i]-1)
-		return
-	}
 
 	if reply.Success {
-		rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d success, updating matchIndex and nextIndex\n", rf.me, rf.term, i)
 		rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
 		rf.nextIndex[i] = rf.matchIndex[i] + 1
+		rf.logger.Printf("(%d){%d}[handleAppendEntriesResponse] args.PrevLogIndex: %d, len(args.Entries): %d\n", rf.me, rf.term, args.PrevLogIndex, len(args.Entries))
+		rf.logger.Printf("(%d){%d}[handleAppendEntriesResponse] node %d append success, matchIndex: %d, nextIndex: %d\n", rf.me, rf.term, i, rf.matchIndex[i], rf.nextIndex[i])
 	} else if reply.Term > rf.term {
-		rf.logger.Printf("(%d){%d}[broadcastAppendEntries] term %d < %d become follower again.\n", rf.me, rf.term, rf.term, reply.Term)
+		rf.logger.Printf("(%d){%d}[handleAppendEntriesResponse] term %d < %d become follower again.\n", rf.me, rf.term, rf.term, reply.Term)
 		rf.term = reply.Term
 		rf.state = 0 // Assume 0 is follower
 	} else {
-		rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d append failed, decrement nextIndex\n", rf.me, rf.term, i)
-		rf.nextIndex[i]--
+		rf.logger.Printf("(%d){%d}[handleAppendEntriesResponse] node %d append failed, decrement nextIndex\n", rf.me, rf.term, i)
+		rf.nextIndex[i] = max(1, rf.nextIndex[i]-1)
 	}
 }
 
@@ -569,17 +571,18 @@ func (rf *Raft) updateCommitIndex() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	copyMatchIndex := make([]int, len(rf.matchIndex))
+	rf.logger.Printf("(%d){%d}[updateCommitIndex] matchIndex: %v\n", rf.me, rf.term, rf.matchIndex)
 	copy(copyMatchIndex, rf.matchIndex)
 	sort.Ints(copyMatchIndex)
 	newCommitIndex := copyMatchIndex[(len(copyMatchIndex)-1)/2]
-	rf.logger.Printf("(%d){%d}[broadcastAppendEntries] sorted matchIndex: %v\n", rf.me, rf.term, copyMatchIndex)
-	rf.logger.Printf("(%d){%d}[broadcastAppendEntries] newCommitIndex: %d\n", rf.me, rf.term, newCommitIndex)
+	rf.logger.Printf("(%d){%d}[updateCommitIndex] sorted matchIndex: %v\n", rf.me, rf.term, copyMatchIndex)
+	rf.logger.Printf("(%d){%d}[updateCommitIndex] newCommitIndex: %d\n", rf.me, rf.term, newCommitIndex)
 	if rf.commitIndex < newCommitIndex {
-		rf.logger.Printf("(%d){%d}[broadcastAppendEntries] Updating commitIndex from %d to %d\n", rf.me, rf.term, rf.commitIndex, newCommitIndex)
+		rf.logger.Printf("(%d){%d}[updateCommitIndex] Updating commitIndex from %d to %d\n", rf.me, rf.term, rf.commitIndex, newCommitIndex)
 		rf.commitIndex = newCommitIndex
 		rf.applyEntries()
 	}
-	rf.logger.Printf("(%d){%d}[broadcastAppendEntries] final commitIndex: %d\n", rf.me, rf.term, rf.commitIndex)
+	rf.logger.Printf("(%d){%d}[updateCommitIndex] final commitIndex: %d\n", rf.me, rf.term, rf.commitIndex)
 }
 
 func (rf *Raft) convertToLeader() {
@@ -599,7 +602,6 @@ func (rf *Raft) convertToLeader() {
 	}
 
 	rf.mu.Unlock()
-	// rf.lastHeartbeat = time.Now()
 }
 func (rf *Raft) applyEntries() {
 	rf.logger.Printf("(%d){%d}[applyEntries] commitIndex: %d, lastApplied: %d\n", rf.me, rf.term, rf.commitIndex, rf.lastApplied)
@@ -634,7 +636,6 @@ func (rf *Raft) convertToFollower(term int) {
 	rf.term = term
 	rf.state = 0
 	rf.voteCount = 0
-	// rf.lastHeartbeat = time.Now()
 }
 
 func (rf *Raft) requireHeartbeat() bool {
@@ -649,15 +650,6 @@ func (rf *Raft) isLeader() bool {
 	defer rf.mu.Unlock()
 	return rf.state == 1
 
-}
-func (rf *Raft) heartbeatExpire(delay time.Duration) bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if time.Now().Sub(rf.lastHeartbeat) > delay {
-		rf.logger.Printf("(%d)[heartbeatExpire]actual delay: %.3f, expect delay: %.3f\n", rf.me, float32(time.Now().Sub(rf.lastHeartbeat))/1e9, float32(delay)/1e9)
-		return true
-	}
-	return false
 }
 
 // the service or tester wants to create a Raft server. the ports

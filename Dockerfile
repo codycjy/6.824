@@ -1,4 +1,4 @@
-FROM golang
+FROM golang:latest@sha256:4950c1cce16bb754e23ee70d25a67e906149d0faedc0aaeed49c075b696fa889
 
 WORKDIR /app
 
