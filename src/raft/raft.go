@@ -45,7 +45,7 @@ import (
 var FOLLOWER = 0
 var LEADER = 1
 var CANDIDATE = 2
-var baseDelay = 300 
+var baseDelay = 300
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -258,7 +258,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.logger.Printf("(%d){%d}[AppendEntries] Received heartbeat from leader%d\n", rf.me, rf.term, args.LeaderId)
 	rf.logger.Printf("(%d){%d}[AppendEntries] Leader's Append log: %v\n", rf.me, rf.term, args.Entries)
 
-	if args.PrevLogIndex > len(rf.Log) -1{
+	if args.PrevLogIndex > len(rf.Log)-1 {
 		rf.logger.Printf("(%d){%d}[AppendEntries] PrevLogIndex %d > len(rf.Log) %d\n", rf.me, rf.term, args.PrevLogIndex, len(rf.Log))
 		reply.Success = false
 		return
@@ -408,8 +408,8 @@ func (rf *Raft) ticker() {
 			rf.me, rf.term, rf.state, rf.LeaderId, rf.term, elapsed)
 		rf.mu.Unlock()
 
-		isLeader:=rf.isLeader()
-		if !isLeader&& isTimeout {
+		isLeader := rf.isLeader()
+		if !isLeader && isTimeout {
 			rf.mu.Lock()
 			rf.logger.Printf("(%d){%d}[ticker] Heartbeat timeout for node %d. Starting election.\n", rf.me, rf.term, rf.me)
 			rf.mu.Unlock()
@@ -479,7 +479,6 @@ func (rf *Raft) startVote() {
 
 }
 
-
 func (rf *Raft) broadcastAppendEntries() {
 	rf.mu.Lock()
 	term := rf.term
@@ -488,7 +487,6 @@ func (rf *Raft) broadcastAppendEntries() {
 	rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d broadcast, current commitIndex %d\n", rf.me, rf.term, rf.me, commitIndex)
 	rf.mu.Unlock()
 
-
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
@@ -496,7 +494,7 @@ func (rf *Raft) broadcastAppendEntries() {
 		go func(i int) {
 			rf.mu.Lock()
 			log := []LogEntry{}
-			for j := max(0,rf.nextIndex[i]); j < len(rf.Log); j++ {
+			for j := max(0, rf.nextIndex[i]); j < len(rf.Log); j++ {
 				if rf.Log[j].Command != nil {
 					log = append(log, rf.Log[j])
 				}
@@ -536,7 +534,7 @@ func (rf *Raft) broadcastAppendEntries() {
 			rf.mu.Unlock()
 		}(i)
 	}
-	time.Sleep(400* time.Microsecond)
+	time.Sleep(400 * time.Microsecond)
 	rf.mu.Lock()
 	rf.logger.Printf("(%d){%d}[broadcastAppendEntries] all nodes done\n", rf.me, rf.term)
 	rf.mu.Unlock()
@@ -566,7 +564,6 @@ func (rf *Raft) handleAppendEntriesResponse(i int, args *AppendEntriesArgs, repl
 		rf.nextIndex[i]--
 	}
 }
-
 
 func (rf *Raft) updateCommitIndex() {
 	rf.mu.Lock()
