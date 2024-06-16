@@ -414,7 +414,12 @@ func (rf *Raft) ticker() {
 			rf.startVote()
 		}
 
-		if rf.isLeader() {
+		if isLeader{
+			rf.mu.Lock()
+			rf.lastHeartbeat = time.Now()
+			rf.logger.Printf("(%d){%d}[ticker] Leader Resetting heartbeat\n", rf.me, rf.term)
+			rf.mu.Unlock()
+
 			rf.broadcastAppendEntries()
 		}
 
@@ -482,7 +487,7 @@ func (rf *Raft) broadcastAppendEntries() {
 	term := rf.term
 	leader := rf.me
 	commitIndex := rf.commitIndex
-	// rf.lastHeartbeat = time.Now()
+	// rf.lastHeartbeat = time.Now() // why?  remove it pass the test
 	rf.logger.Printf("(%d){%d}[broadcastAppendEntries] node %d broadcast, current commitIndex %d\n", rf.me, rf.term, rf.me, commitIndex)
 	rf.mu.Unlock()
 
