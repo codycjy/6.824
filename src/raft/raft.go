@@ -42,10 +42,10 @@ import (
 // in part 2D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
-var FOLLOWER = 0
-var LEADER = 1
-var CANDIDATE = 2
-var baseDelay = 250
+const FOLLOWER = 0
+const LEADER = 1
+const CANDIDATE = 2
+const baseDelay = 150
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -204,11 +204,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.term
 		return
 	}
+	// 拒绝投票的情况：日志Term
+	if args.LastLogTerm < rf.Log[len(rf.Log)-1].Term {
+		rf.logger.Printf("(%d){%d}[RequestVote] LastLogTerm %d!= rf.Log[len(rf.Log)-1].Term %d\n", rf.me, rf.term, args.LastLogTerm, rf.Log[len(rf.Log)-1].Term)
+		reply.VoteGranted=false
+		reply.Term=rf.term
+		return
+	}
+
+	if args.LastLogIndex< len(rf.Log)-1{
+		rf.logger.Printf("(%d){%d}[RequestVote] LastLogIndex %d < len(rf.Log)-1 %d\n", rf.me, rf.term, args.LastLogIndex, len(rf.Log)-1)
+		reply.VoteGranted=false
+		reply.Term=rf.term
+		return
+	}
 
 	// 更新任期和状态，转变为跟随者
 	if args.Term > rf.term {
 		rf.term = args.Term
-		rf.state = FOLLOWER // 假设 state = 0 表示跟随者
+		rf.state = FOLLOWER 
 		reply.VoteGranted = true
 		rf.votedFor[args.Term] = args.CandidateId
 		rf.logger.Printf("(%d){%d}[RequestVote] term updated to %d, state changed to %d\n", rf.me, rf.term, rf.term, rf.state)
@@ -240,7 +254,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.term {
 		rf.logger.Printf("(%d){%d}[AppendEntries] Updating term from %d to %d, new leader: %d\n",
 			rf.me, rf.term, rf.term, args.Term, args.LeaderId)
-		rf.state = 0 // 假设 state = 0 表示跟随者
+		rf.state = FOLLOWER
 		rf.term = args.Term
 		rf.LeaderId = args.LeaderId
 		return
@@ -437,6 +451,9 @@ func (rf *Raft) startVote() {
 	rf.lastHeartbeat = time.Now()
 	rf.logger.Printf("(%d){%d}[startVote]Vote start\n", rf.me, rf.term)
 	rf.votedFor[voteTerm] = voteCandidate
+	lastLogTerm:=rf.Log[len(rf.Log)-1].Term
+	lastLogIndex:=len(rf.Log)-1
+	
 	rf.mu.Unlock()
 
 	for i := range rf.peers {
@@ -449,8 +466,8 @@ func (rf *Raft) startVote() {
 			args := &RequestVoteArgs{
 				Term:         voteTerm,
 				CandidateId:  voteCandidate,
-				LastLogIndex: 0,
-				LastLogTerm:  0,
+				LastLogIndex: lastLogIndex,
+				LastLogTerm:  lastLogTerm,
 			}
 			reply := &RequestVoteReply{}
 
